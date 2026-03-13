@@ -1,0 +1,55 @@
+name,description,query,id,parentId,isFolder
+osb-guide,,,0,,true
+1. Controlled Terminology,,,1,0,true
+1.1 CT packages structure,Show the SDTM CT catalogue with its packages codelists and terms,"MATCH p=(:CTPackage)<-[:CONTAINS_PACKAGE]-(cat:CTCatalogue WHERE cat.name=""SDTM CT"")-[:HAS_CODELIST]->(:CTCodelistRoot)-[:HAS_TERM]->(:CTCodelistTerm)-[:HAS_TERM_ROOT]->(:CTTermRoot)
+RETURN p LIMIT 20",2,1,false
+1.2 Libraries with CT codelists,List all libraries that contain at least one CT codelist,"MATCH (n:Library) WHERE EXISTS { (n)-->(:CTCodelistRoot) } RETURN n.name AS library",3,1,false
+1.3 CT Term Name and Attributes,Show the split between Name (sponsor override) and Attributes (CDISC issuer) nodes for CT terms,"MATCH (n:Library WHERE n.name=""CDISC"")-[:CONTAINS_CODELIST]->(c)-[:HAS_TERM]->(:CTCodelistTerm)-[:HAS_TERM_ROOT]->(t:CTTermRoot)-->()-[:LATEST]->(nv:CTTermNameValue)
+MATCH (t:CTTermRoot)-->()-[:LATEST]->(av:CTTermAttributesValue)
+MATCH (c)-->()-[:LATEST]->(cnv:CTCodelistNameValue)
+RETURN n.name AS library, cnv.name AS codelist, properties(nv) AS name, properties(av) AS attributes
+LIMIT 5",4,1,false
+1.4 Sponsor name overrides,Find terms where the sponsor name differs from the CDISC preferred term,"MATCH (n:Library WHERE n.name=""CDISC"")-[:CONTAINS_CODELIST]->(c)-[:HAS_TERM]->(:CTCodelistTerm)-[:HAS_TERM_ROOT]->(t:CTTermRoot)-->()-[:LATEST]->(nv:CTTermNameValue)
+MATCH (t:CTTermRoot)-->()-[:LATEST]->(av:CTTermAttributesValue)
+WITH DISTINCT nv.name AS sponsor_name, av.preferred_term AS CDISC_name
+WHERE sponsor_name <> CDISC_name
+RETURN sponsor_name, CDISC_name
+LIMIT 20",5,1,false
+2. Dictionaries,,,6,0,true
+2.1 Libraries with Dictionary codelists,List all libraries that contain at least one dictionary codelist,"MATCH (n:Library) WHERE EXISTS { (n)-->(:DictionaryCodelistRoot) } RETURN n.name AS library",7,6,false
+2.2 SNOMED dictionary terms,Browse SNOMED codelists and terms with their properties — unlike CT terms there is no Name/Attributes split,"MATCH (n:Library WHERE n.name=""SNOMED"")-[:CONTAINS_DICTIONARY_CODELIST]->(c)-[:HAS_TERM]->(t:DictionaryTermRoot)-[:LATEST]->(v:DictionaryTermValue)
+MATCH (c)-[:LATEST]->(cv:DictionaryCodelistValue)
+RETURN n.name AS library, cv.name AS codelist, properties(v) AS term
+LIMIT 5",8,6,false
+3. Templates,,,9,0,true
+3.1 Template types in the database,List all template node label types currently stored in the database,"MATCH (n) WITH DISTINCT labels(n) AS labels
+UNWIND labels AS label
+WITH label WHERE label CONTAINS ""Template"" AND label CONTAINS ""Root"" AND NOT label CONTAINS ""Parameter"" AND NOT label CONTAINS ""Odm""
+RETURN DISTINCT label ORDER BY label",10,9,false
+3.2 Criteria template examples,Show criteria templates with their parameters and CT term type — Root holds immutable relationships while Value nodes hold the text,"MATCH p=(l:Library)-->(n:CriteriaTemplateRoot)-->(:TemplateParameter)
+WITH p LIMIT 5
+MATCH subpath=(type:CTTermRoot)<-[:HAS_TYPE]-(n)-[:HAS_VERSION]->(version)
+RETURN p, subpath",11,9,false
+3.3 Template parameters,List all available template parameter types,"MATCH (n:TemplateParameter) RETURN n",12,9,false
+3.4 Parameter value types,Show which node types can be used as values for each template parameter type,"MATCH (n:TemplateParameter)-[:HAS_VALUE]->(m)
+WITH n.name AS parameterType, labels(m) AS labels
+UNWIND labels AS label
+WITH parameterType, label WHERE NOT label IN [""TemplateParameterValueRoot"", ""ConceptRoot"", ""FindingRoot"", ""ActivityInstanceRoot"", ""SnomedTermRoot"", ""SimpleConceptRoot""]
+RETURN DISTINCT parameterType, collect(DISTINCT label) AS labels",13,9,false
+3.5 Study objective from template,Show how a study objective is derived from a template with injected parameter values and linked to a StudySelection for auditing,"MATCH p=(:ObjectiveTemplateValue)<-[:LATEST]-(:ObjectiveTemplateRoot)-->(:ObjectiveRoot)-[:LATEST]->(v:ObjectiveValue)-[:OV_USES_VALUE]->()-[:LATEST]->()
+MATCH subpath=(v)<--(:StudySelection)<--(:StudyValue)
+RETURN p, subpath LIMIT 1",14,9,false
+4. Versioning,,,15,0,true
+4.1 Root-Value structure,Show the Root-Value versioning pattern — Root holds immutable properties (uid) while Value nodes hold properties that can change over time (name),"MATCH p=()<-[:OT_USES_PARAMETER]-(:ObjectiveTemplateRoot)-->(v:ObjectiveTemplateValue)
+RETURN p LIMIT 1",16,15,false
+4.2 Immutable relationships on Root,Show that Library and Parameters are attached to the Root node — a template always belongs to the same library and its parameters never change,"MATCH p=(l:Library)-->(n:CriteriaTemplateRoot)-->(:TemplateParameter)
+RETURN p LIMIT 3",17,15,false
+4.3 Versioned relationships on Value,Show that a specific StudyValue selects a specific ObjectiveValue — both are versioned so only compatible versions are linked,"MATCH p=(:StudyValue)-->(:StudySelection)-->(:ObjectiveValue)
+RETURN p LIMIT 3",18,15,false
+4.4 HAS_VERSION relationship properties,Inspect the properties of a HAS_VERSION relationship: status (Draft/Final/Retired) start_date end_date change_description user_initials version,"MATCH ()-[rel:HAS_VERSION]-()
+WHERE rel.end_date IS NOT NULL
+RETURN properties(rel) LIMIT 1",19,15,false
+4.5 Convenience relationships between Root and Value,List all relationship types that exist between a Root and its Value nodes besides HAS_VERSION — includes LATEST and LATEST_DRAFT/FINAL/RETIRED shortcuts,"MATCH (a)-[rel:HAS_VERSION]-(b)
+MATCH (a)-[other_rel]-(b)
+WHERE NOT other_rel:HAS_VERSION
+RETURN DISTINCT type(other_rel)",20,15,false

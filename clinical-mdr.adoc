@@ -1,0 +1,276 @@
+= Guide to the OpenStudyBuilder data model
+
+== Clinical MDR and Neo4j
+
+image::https://avatars3.githubusercontent.com/u/201120[width=200,float=right]
+
+The Clinical MDR is a Neo4j graph database, underlying to the OpenStudyBuilder application and accessible through a Python API.
+
+The goal of this guide is to explore the physical data model (i.e. how the data is actually stored in the database).
+
+For this, we will provide a set of queries that you can execute to retrieve example data, with some explanations.
+These queries use the Cypher language, used by Neo4j to query data.
+
+_Note : When you run some queries and get the graph visualization back, you can click on the Node labels on the right side of the window to pick a color for each label. This will help you see the results in a clearer fashion._
+
+== Model overview
+
+The Clinical MDR data model is made of several sub-domains :
+
+* Library
+** Controlled Terminology
+** Dictionaries
+** Biomedical Concepts
+** Models and Implementation Guides
+** Templates for Study components
+
+* Studies
+** Study Definition
+
+== Library - Controlled Terminology (1/2)
+
+Periodically, CDISC releases new controlled terminology packages, which we preload in the MDR database.
+
+This is structured like so :
+
+* A catalogue (e.g. SDTM CT) contains packages
+* Once unpacked, these packages contain Codelists and Terms
+
+The following query will show you a subset of this structure as stored in the database.
+
+[source,cypher]
+----
+MATCH p=(:CTPackage)<-[:CONTAINS_PACKAGE]-(cat:CTCatalogue WHERE cat.name="SDTM CT")-[:HAS_CODELIST]->(:CTCodelistRoot)-[:HAS_TERM]->(:CTCodelistTerm)-[:HAS_TERM_ROOT]->(:CTTermRoot)
+RETURN p LIMIT 20
+----
+
+== Library - Controlled Terminology (2/2)
+
+In the previous slide, we mentioned CDISC ; but other libraries are present in the database.
+
+[source,cypher]
+----
+MATCH (n:Library) WHERE EXISTS { (n)-->(:CTCodelistRoot) } RETURN n.name AS library
+----
+
+Here, notice the _Sponsor_ library. This allow organizations to create their own codelists and terms.
+
+Both codelists and terms nodes are then actually represented by two distinct nodes : _Name_ and _Attributes_.
+
+[source,cypher]
+----
+MATCH (n:Library WHERE n.name="CDISC")-[:CONTAINS_CODELIST]->(c)-[:HAS_TERM]->(:CTCodelistTerm)-[:HAS_TERM_ROOT]->(t:CTTermRoot)-->()-[:LATEST]->(nv:CTTermNameValue)
+MATCH (t:CTTermRoot)-->()-[:LATEST]->(av:CTTermAttributesValue)
+MATCH (c)-->()-[:LATEST]->(cnv:CTCodelistNameValue)
+RETURN n.name AS library, cnv.name AS codelist, properties(nv) AS name, properties(av) AS attributes
+LIMIT 5
+----
+
+The Attributes node stores the properties coming from the issuer (e.g. CDISC) ; while the Name node, contains Sponsor overrides, for example if you use your own names that are different from CDISC.
+
+Here are some examples :
+
+[source,cypher]
+----
+MATCH (n:Library WHERE n.name="CDISC")-[:CONTAINS_CODELIST]->(c)-[:HAS_TERM]->(:CTCodelistTerm)-[:HAS_TERM_ROOT]->(t:CTTermRoot)-->()-[:LATEST]->(nv:CTTermNameValue)
+MATCH (t:CTTermRoot)-->()-[:LATEST]->(av:CTTermAttributesValue)
+WITH DISTINCT nv.name AS sponsor_name, av.preferred_term AS CDISC_name
+WHERE sponsor_name <> CDISC_name
+RETURN sponsor_name, CDISC_name
+LIMIT 20
+----
+
+_Note : You might also notice that the node labels have a Root or Value suffix, and we use some LATEST relationships. We will explain this in a later section about Versioning._
+
+== Library - Dictionaries
+
+Dictionaries work in much the same way as the CT Terms : A group of _Terms_ belong to a _Codelist_, and they live inside a _Library_.
+
+[source,cypher]
+----
+MATCH (n:Library) WHERE EXISTS { (n)-->(:DictionaryCodelistRoot) } RETURN n.name AS library
+----
+
+The main difference is that there is (currently) no split between _Name_ and _Attributes_.
+
+[source,cypher]
+----
+MATCH (n:Library WHERE n.name="SNOMED")-[:CONTAINS_DICTIONARY_CODELIST]->(c)-[:HAS_TERM]->(t:DictionaryTermRoot)-[:LATEST]->(v:DictionaryTermValue)
+MATCH (c)-[:LATEST]->(cv:DictionaryCodelistValue)
+RETURN n.name AS library, cv.name AS codelist, properties(v) AS term
+LIMIT 5
+----
+
+== Library - Models and Implementation Guides
+
+_Coming soon_
+
+=== Models
+=== Implementation Guides
+
+== Library - Biomedical Concepts
+=== Activities
+=== Units
+=== CRF
+=== Compounds
+
+== Library - Templates for Study components (1/3)
+
+If you haven't used the OpenStudyBuilder application yet, templates are a way to reuse user/sponsor-defined content between studies, with study-specific parameters.
+
+These are the different types of templates in the database :
+
+[source,cypher]
+----
+MATCH (n) WITH DISTINCT labels(n) AS labels
+UNWIND labels AS label
+WITH label WHERE label CONTAINS "Template" AND label CONTAINS "Root" AND NOT label CONTAINS "Parameter" AND NOT label CONTAINS "Odm"
+RETURN DISTINCT label ORDER BY label
+----
+
+Templates have three levels :
+
+* "Pure" templates with a text, parameter placeholders, and indexing properties
+* Pre-defined template instances, implementing this template with default values for the parameters
+* Study-specific template instances
+
+The data model supporting these objects is still evolving, but the following is how it looks, as of OSB version 0.2 (December 2022).
+
+Here are a few examples of Criteria templates :
+
+[source,cypher]
+----
+MATCH p=(l:Library)-->(n:CriteriaTemplateRoot)-->(:TemplateParameter)
+WITH p LIMIT 5
+MATCH subpath=(type:CTTermRoot)<-[:HAS_TYPE]-(n)-[:HAS_VERSION]->(version)
+RETURN p, subpath
+----
+
+With the previous result, you can see that the Root node holds all the relationships (especially to the parameters and indexing concepts like the Type which is a CTTerm) ; while the Version (Value) nodes hold the _name_ property (the actual text for the template). We will come back to Versioning in a later section, but this is because anything that can evolve over time (the textual part of the template) must be on the version (Value) nodes, while the immutable properties (identifier, list of parameters) must be on the Root node.
+
+_Note : This query might return templates that live in either the "Sponsor" or "User Defined" libraries. Sponsor are the ones created from inside the Library menu of the OpenStudyBuilder application, while User Defined are created by users when creating components from inside the Study menu directly._
+
+== Library - Templates for Study components (2/3)
+
+The list of concepts available as parameters is stored as nodes, some of them being part of a tree (inheritance), and some of them having another type (e.g. DictionaryCodelist for DiseaseDisorder) :
+
+[source,cypher]
+----
+MATCH (n:TemplateParameter) RETURN n
+----
+
+Then, the available values for these parameters can be of different types. Most of them are Concepts (see the section on Biomedical Concepts), but some can be different (e.g. StudyEndpoint, which are themselves an instance of a template, in the context of your current study.). To identify which nodes are available as a template parameter value, we add an extra label to them : TemplateParameterRoot / TemplateParameterValue (see the section on Versioning for more information about Root vs Value).
+
+Here is a list of potential value types for each parameter type :
+
+[source,cypher]
+----
+MATCH (n:TemplateParameter)-[:HAS_VALUE]->(m)
+WITH n.name AS parameterType, labels(m) AS labels
+UNWIND labels AS label
+WITH parameterType, label WHERE NOT label IN ["TemplateParameterValueRoot", "ConceptRoot", "FindingRoot", "ActivityInstanceRoot", "SnomedTermRoot", "SimpleConceptRoot"]
+RETURN DISTINCT parameterType, collect(DISTINCT label) AS labels
+----
+
+_TODO : Add a section about default parameter values here_
+
+== Library - Templates for Study components (3/3)
+
+Finally, in the context of a study, a user can create components (Objective, Criteria, ...) based off of templates.
+
+[source,cypher]
+----
+MATCH p=(:ObjectiveTemplateValue)<-[:LATEST]-(:ObjectiveTemplateRoot)-->(:ObjectiveRoot)-[:LATEST]->(v:ObjectiveValue)-[:OV_USES_VALUE]->()-[:LATEST]->()
+MATCH subpath=(v)<--(:StudySelection)<--(:StudyValue)
+RETURN p, subpath LIMIT 1
+----
+
+As you can see in the result of the query above, the ObjectiveValue node has a _name_ property derived from the _name_ of the template object, injected with some template parameter values.
+
+You will also notice an intermediate node between the _StudyValue_ node and the _ObjectiveValue_ node, with the label _StudySelection_. This is for auditing purposes as these nodes can also be linked to some _StudyAction_ nodes, storing the information about who did what change when ; this node also holds some properties like the _order_ index of the selection as objectives for a given study are ordered.
+
+== Study Definition
+
+== Versioning (1/3)
+
+Most of the objects in the OpenStudyBuilder data model are versioned, for auditing purposes.
+
+The general idea is that an object is split into two parts : a Root node, and one or many Value nodes. The Root node contains all the _immutable_ properties and relationships ; while the Value nodes store the ones that might _change_ over time. In other words, the Root node represent the _conceptual_ object, while the Value nodes are the _versions_ of this object.
+
+Look at this example on Syntax Templates :
+
+[source,cypher]
+----
+MATCH p=()<-[:OT_USES_PARAMETER]-(:ObjectiveTemplateRoot)-->(v:ObjectiveTemplateValue)
+RETURN p LIMIT 1
+----
+
+The Root node contains only two properties : uid, and editable_instance. The unique identifier (uid) will obviously never change over time ; as for the editable_instance, this is a property to enable users to change the template name when they create an instance of a template, and this is set at template creation time and can never be changed. (Note : this feature is not implemented in the OSB application).
+
+The Value node contains two properties : name, and name_plain. These can change over time ; and if one of them changes, then a new Value node will be created with the new properties.
+
+The same applies to the relations : those that will never change during the life of the object should be attached to the Root node ; and those that can change, to the Value node
+
+[source,cypher]
+----
+MATCH p=(l:Library)-->(n:CriteriaTemplateRoot)-->(:TemplateParameter)
+RETURN p LIMIT 3
+----
+
+In the above query, you can see that the available _Parameters_ and the _Library_ nodes are attached to the _TemplateRoot_ : a given template will always belong to the same Library, and its Parameters will never change.
+
+Whereas if you look at the following query :
+
+[source,cypher]
+----
+MATCH p=(:StudyValue)-->(:StudySelection)-->(:ObjectiveValue)
+RETURN p LIMIT 3
+----
+
+A specific version (_StudyValue_ node) will select a specific version of an _Objective_ (_ObjectiveValue_ node).
+
+== Versioning (2/3)
+
+The relations between a Root node and its Value nodes also hold interesting information. All Root-Value pairs should have at least one _HAS_VERSION_ relationship, with the following properties :
+
+[source,cypher]
+----
+MATCH ()-[rel:HAS_VERSION]-()
+WHERE rel.end_date IS NOT NULL
+RETURN properties(rel) LIMIT 1
+----
+
+Before we look at the meaning of these properties, you should know that versioned objects in the OSB data model (except the Study itself, see the next section) can be in the following states ; and it can transition between these states over time :
+
+* Draft - Working version of an object - To be approved before it can be used
+* Final - Approved version of an object - Can be used
+* Retired - Cannot be used anymore - This can be considered as a _soft delete_
+
+Therefore, this is the meaning of the _HAS_VERSION_ relationship's properties :
+
+* status - State of this version (Draft, Final, Retired)
+* start_date - Creation date of this version
+* end_date - Date when the object transitioned to a new version / a new state
+* change_description - A text explaining the reasons for the transition into this version
+* user_initials - Username for user who created this version - Can be a programmatic user like "Import-procedure", or a human user approving an object (for example)
+* version - The OSB API automatically increments a version number and stores it here
+
+For convenience, the API also creates some extra relationships when a new version is created or the object's _status_ changes :
+
+[source,cypher]
+----
+MATCH (a)-[rel:HAS_VERSION]-(b)
+MATCH (a)-[other_rel]-(b)
+WHERE NOT other_rel:HAS_VERSION
+RETURN DISTINCT type(other_rel)
+----
+
+Note that here, _LATEST_ is the latest version, regardless of the status of this latest version, so an object (the Root node) will have only one _LATEST_ relationship ; whereas it can have one of each of the _LATEST_xxstatusxx_ relationships.
+
+== Versioning (3/3)
+
+_TODO : Add Study versioning here_
+
+== Learn more
+* https://www.cdisc.org/standards/terminology/controlled-terminology[CDISC Controlled Terminology]
+* https://gitlab.com/Novo-Nordisk/nn-public/openstudybuilder/OpenStudyBuilder-Solution/-/tree/main/neo4j-mdr-db/model[Data model diagrams]
